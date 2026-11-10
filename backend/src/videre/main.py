@@ -7,8 +7,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from videre import __version__
-from videre.api import health
+from videre.api import health, runs
 from videre.config import Settings, get_settings
+from videre.services.events import EventHub
+from videre.services.runs import RunService
 from videre.storage.db import Store
 
 
@@ -20,6 +22,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store = Store(settings.db_path)
         await store.open()
         app.state.store = store
+        app.state.hub = EventHub(store)
+        app.state.runs = RunService(app.state.hub)
         try:
             yield
         finally:
@@ -34,6 +38,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["Content-Type", "Last-Event-ID"],
     )
     app.include_router(health.router, prefix="/api")
+    app.include_router(runs.router, prefix="/api")
     return app
 
 
