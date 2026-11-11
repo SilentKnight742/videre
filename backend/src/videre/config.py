@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     gemini_model: str = ""
     # Client-side request budget for the model provider (free tier).
     gemini_rpm: int = Field(default=10, gt=0)
+    # Output cap per model call. 8192 because a whole index.html travels in one tool call and
+    # thinking tokens may count against the limit (SPEC-A2 section 9).
+    max_output_tokens: int = Field(default=8192, gt=0)
 
     rail: Literal["paypal", "mock"] = "mock"
     demo_replay: bool = False

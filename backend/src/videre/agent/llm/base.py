@@ -72,6 +72,12 @@ def estimate_request_max_micro(req: LLMRequest, prices: Prices) -> int:
     return estimate_max_micro(req.input_chars(), req.max_output_tokens, prices)
 
 
+def render_request(req: LLMRequest) -> str:
+    """The request as one readable text, for `node_io.prompt` (what a person sees per step)."""
+    parts = [f"[system]\n{req.system}", *(f"[{m.role}]\n{m.text}" for m in req.messages)]
+    return "\n\n".join(parts)
+
+
 def parse_json_object(text: str) -> dict[str, Any] | None:
     """Parse `text` as a JSON object; None if it is not one (the caller decides on repair)."""
     try:

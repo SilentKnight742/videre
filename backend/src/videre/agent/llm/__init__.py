@@ -14,6 +14,7 @@ from videre.agent.llm.base import (
     ReplayMiss,
     estimate_request_max_micro,
     parse_json_object,
+    render_request,
 )
 from videre.agent.llm.caching import CachingProvider, SqliteResponseStore, cache_key
 from videre.agent.llm.fake import FakeProvider
@@ -38,6 +39,7 @@ __all__ = [
     "cache_key",
     "estimate_request_max_micro",
     "parse_json_object",
+    "render_request",
 ]
 
 
