@@ -39,7 +39,9 @@ _INITIAL = frozenset(
     {NodeStatus.BLOCKED, NodeStatus.WAITING_FUNDS, NodeStatus.READY, NodeStatus.RUNNING}
 )
 ROOT_TITLE_MAX = 60
+# Actors: who executes a node.
 PLANNER = "planner"
+EXECUTOR = "executor"
 
 _NOW = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
 
@@ -114,6 +116,12 @@ class RunService:
             raise ValueError(f"unknown run {run_id}")
         return row["id"]
 
+    async def prompt(self, run_id: str) -> str:
+        row = await self.hub.store.fetch_one("SELECT prompt FROM runs WHERE id = ?", (run_id,))
+        if row is None:
+            raise ValueError(f"unknown run {run_id}")
+        return row["prompt"]
+
     async def set_run_status(
         self, run_id: str, status: RunStatus, *, error: str | None = None
     ) -> None:
@@ -131,6 +139,21 @@ class RunService:
             )
             extra = {"error": error} if error is not None else {}
             await tx.emit(run_id, EventType.RUN_STATUS, status=status, **extra)
+
+    async def set_run_title(self, run_id: str, title: str) -> None:
+        """Name the run (the planner does this from its plan). Emits `run.title`.
+
+        The title is collapsed to one line and cut to 60 characters; the root task keeps its
+        own title (the shortened prompt).
+        """
+        clean = clip(" ".join(title.split()), ROOT_TITLE_MAX)
+        if not clean:
+            raise ValueError("title must not be empty")
+        async with self.hub.transaction() as tx:
+            cur = await tx.conn.execute("UPDATE runs SET title = ? WHERE id = ?", (clean, run_id))
+            if cur.rowcount == 0:
+                raise ValueError(f"unknown run {run_id}")
+            await tx.emit(run_id, EventType.RUN_TITLE, title=clean)
 
     # ---- nodes ------------------------------------------------------------------------------
 

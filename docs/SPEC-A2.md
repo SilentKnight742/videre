@@ -35,6 +35,7 @@ Extend, do not rename, A1's vocabulary. Payloads carry absolute values (reducer 
 |---|---|
 | `run.created` | `prompt, title, provider, model, source="native"` |
 | `run.status` | `status, error?` |
+| `run.title` | `title` (<= 60 chars; set by the planner from its plan via `RunService.set_run_title`) |
 | `node.created` | existing + `step_type, actor, turn, depth, objective` |
 | `node.status` | `status, reason?` |
 | `node.thought` | `text` (<= 500 chars; full text in node_io) |
