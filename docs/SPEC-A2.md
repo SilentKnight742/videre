@@ -72,7 +72,7 @@ class LLMProvider(Protocol):
 Implementations and wrappers (compose them, do not merge them):
 - `GeminiProvider` (google-genai, `client.aio.models.generate_content`, JSON mime type + response schema, system instruction, max output tokens). Read tokens from `usage_metadata` (prompt, candidates, and thoughts token counts if present). If the SDK and model support thought summaries, fill `thought_summary`; verify, do not assume.
 - `FakeProvider`: scripted responses keyed by a matcher; counts calls. **All non-live tests use it. No test touches the network.**
-- `CachingProvider(inner, store, replay: bool)`: key = sha256(model + canonical JSON of the request). Normal mode: read-through, write on miss. `DEMO_REPLAY=1`: cache only; a miss raises `ReplayMiss` (never silently calls the network).
+- `CachingProvider(inner, store, replay: bool)`: key = sha256(model + canonical JSON of the request). Normal mode: read-through, write on miss. A repeated identical request is served from cache even with DEMO_REPLAY=0; add `LLM_CACHE=readthrough|off|replay` in A2e so a demo can be forced live. `DEMO_REPLAY=1`: cache only; a miss raises `ReplayMiss` (never silently calls the network).
 - `RateLimitedProvider(inner, rpm)`: async token bucket (`GEMINI_RPM`, default 10); on 429 / resource-exhausted, retry with exponential backoff + jitter, honouring a server retry delay if given; max 3 attempts; then raise `ProviderError`.
 - Cost (domain, pure): `cost_micro = ceil((tokens_in * PRICE_IN_PER_MTOK + tokens_out * PRICE_OUT_PER_MTOK) / 1_000_000)` in integer arithmetic. Cached responses are still metered (it is list-price metering) but flagged `cached`.
 - Worst-case estimate (for phase B's reserve): `estimate_max_micro(req)` = estimated input tokens (chars / 4, rounded up, + 10% margin) at input price + `max_output_tokens` at output price.
@@ -111,6 +111,7 @@ Leaf task loop (bounded ReAct):
   `tool_calls` max 3 per turn; `final` null until done. Either tools or final (if both: run tools, then finish).
 - `MAX_TURNS` (default 4). On the last allowed turn the request removes `tool_calls` from the schema and instructs "finish now".
 - Each turn: call the `before_call(node, estimate)` hook (no-op returning allow in phase A; becomes `reserve` in phase B) -> create the llm step (`running`) -> generate -> write `node_io` (prompt, response, thought, tokens, latency, cached) -> `record_cost` -> emit `node.thought`, `node.io` -> step `done`. Then create one tool step per tool call (same `turn`, actor `executor`), run them concurrently, record each result + its declared price, emit `node.io` and, for writes, `artifact.written`.
+- `finish_reason` MAX_TOKENS (truncated JSON) is treated like invalid JSON; the repair step asks for a shorter answer (e.g. split the file into two `write_file` calls).
 - Invalid JSON from the model: one "repair" llm step in the same turn with the parse error; if still invalid, the task `failed` (error stored on the node).
 - Unknown tool or bad args: the tool step `failed` with the error; the error is fed back to the model next turn (the task does not fail for one bad tool call).
 - Task `done`: store `final.output` in the task's `node_io.response`, `final.summary` as `output_preview`, emit `node.output`.
@@ -139,7 +140,8 @@ GET  /api/runs/{id}/artifacts/{path}   raw file
 Security: artifacts are agent-written. Serve them with `Content-Security-Policy: sandbox`, `X-Content-Type-Options: nosniff`, correct content type, never from a path outside the run workspace. The frontend will show HTML in a sandboxed iframe.
 
 ## 9. Config additions (.env.example + config.py)
-`GEMINI_RPM=10`, `MAX_PARALLEL_TASKS=3`, `MAX_TURNS=4`, `MAX_OUTPUT_TOKENS=2048`, `WORKSPACE_DIR=./runs` (git-ignored), `DEMO_REPLAY=0`. Never log prompts at INFO with secrets; never log the API key.
+`GEMINI_RPM=10`, `MAX_PARALLEL_TASKS=3`, `MAX_TURNS=4`, `MAX_OUTPUT_TOKENS=8192`, `GEMINI_THINKING_BUDGET=1024` (set explicitly via `ThinkingConfig.thinking_budget`), `WORKSPACE_DIR=./runs` (git-ignored), `DEMO_REPLAY=0`. Never log prompts at INFO with secrets; never log the API key.
+Why 8192: a whole `index.html` travels inside one `write_file` tool call, so 2048 truncates it, and thinking tokens may count against the output limit. A2c's live test must check that the planner's `finish_reason` is not MAX_TOKENS.
 
 ## 10. Tests (offline unless marked `live`)
 Unit: plan validation (cycle, unknown dep, cross-level dep, bounds, duplicate keys); cost rounding; transition table; workspace sandbox (`..`, absolute, size); rate limiter backoff with a fake clock; cache key stability; replay miss raises.

@@ -26,8 +26,9 @@ class Tx:
         self.events: list[Event] = []
 
     async def emit(
-        self, run_id: str, type_: str, node_id: str | None = None, **payload: Any
+        self, run_id: str, type_: str, node_id: str | None = None, /, **payload: Any
     ) -> Event:
+        """Insert an event row. Positional-only, so a payload may itself carry `node_id`."""
         async with self.conn.execute(
             "INSERT INTO events (run_id, type, node_id, payload_json) VALUES (?, ?, ?, ?)"
             " RETURNING seq, ts",

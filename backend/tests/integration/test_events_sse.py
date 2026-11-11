@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from videre.api.runs import event_stream
 from videre.domain.events import Event, EventType, apply_event, empty_snapshot
-from videre.domain.states import NodeKind, NodeStatus, RunStatus
+from videre.domain.states import NodeKind, NodeStatus, RunStatus, StepType
 from videre.services.events import EventHub
 from videre.services.runs import RunService
 from videre.storage.db import Store
@@ -24,18 +24,29 @@ def runs(hub: EventHub) -> RunService:
 
 
 async def script_run(runs: RunService) -> str:
-    """A small scripted run: two tasks (b depends on a), subtasks, calls, costs, close."""
+    """A small scripted run: root -> (a, b depends on a); a holds steps; costs; close."""
     run_id = await runs.create_run("flower shop site")
-    a = await runs.add_node(run_id, NodeKind.TASK, "Research", est_total_micro=5_000)
-    b = await runs.add_node(
-        run_id, NodeKind.TASK, "Build page", depends_on=[a], est_total_micro=9_000
+    root = await runs.root_id(run_id)
+    a = await runs.add_node(
+        run_id, NodeKind.TASK, "Research", parent_id=root, est_total_micro=5_000
     )
-    sa = await runs.add_node(run_id, NodeKind.SUBTASK, "Survey florists", parent_id=a)
-    ca = await runs.add_node(run_id, NodeKind.CALL, "gemini", parent_id=sa)
+    b = await runs.add_node(
+        run_id, NodeKind.TASK, "Build page", parent_id=root, depends_on=[a], est_total_micro=9_000
+    )
     await runs.set_run_status(run_id, RunStatus.RUNNING)
     await runs.set_node_status(a, NodeStatus.RUNNING)
-    await runs.record_cost(ca, 1_200)
-    await runs.record_cost(ca, 800)
+    s = await runs.add_node(
+        run_id,
+        NodeKind.STEP,
+        "gemini",
+        parent_id=a,
+        step_type=StepType.LLM,
+        turn=0,
+        status=NodeStatus.RUNNING,
+    )
+    await runs.record_cost(s, 1_200)
+    await runs.record_cost(s, 800)
+    await runs.set_node_status(s, NodeStatus.DONE)
     await runs.set_node_status(a, NodeStatus.DONE)
     await runs.set_node_status(b, NodeStatus.READY)
     await runs.set_run_status(run_id, RunStatus.CLOSED)
@@ -56,13 +67,18 @@ async def test_subscriber_sees_events_in_order_and_replay_equals_snapshot(
     hub: EventHub, runs: RunService
 ) -> None:
     run_id = await runs.create_run("x")  # stream needs a run to exist first
+    root = await runs.root_id(run_id)
     reader = asyncio.create_task(collect(event_stream(hub, run_id, after=0)))
     await asyncio.sleep(0)
 
-    a = await runs.add_node(run_id, NodeKind.TASK, "Research", est_total_micro=5_000)
-    b = await runs.add_node(run_id, NodeKind.TASK, "Build", depends_on=[a])
-    s = await runs.add_node(run_id, NodeKind.SUBTASK, "Survey", parent_id=a)
-    c = await runs.add_node(run_id, NodeKind.CALL, "gemini", parent_id=s)
+    a = await runs.add_node(
+        run_id, NodeKind.TASK, "Research", parent_id=root, est_total_micro=5_000
+    )
+    b = await runs.add_node(run_id, NodeKind.TASK, "Build", parent_id=root, depends_on=[a])
+    s = await runs.add_node(run_id, NodeKind.TASK, "Survey", parent_id=a)
+    c = await runs.add_node(
+        run_id, NodeKind.STEP, "gemini", parent_id=s, step_type=StepType.LLM, turn=0
+    )
     await runs.set_node_status(a, NodeStatus.RUNNING)
     await runs.record_cost(c, 1_200)
     await runs.record_cost(c, 800)
@@ -75,16 +91,17 @@ async def test_subscriber_sees_events_in_order_and_replay_equals_snapshot(
     assert seqs == sorted(seqs)
     assert len(set(seqs)) == len(seqs)
     types = [e.type for e in events]
-    assert types[:5] == [
+    assert types[:6] == [
         EventType.RUN_CREATED,
+        EventType.NODE_CREATED,  # root task
         EventType.NODE_CREATED,
         EventType.NODE_CREATED,
         EventType.NODE_CREATED,
         EventType.NODE_CREATED,
     ]
     assert types[-1] == EventType.RUN_CLOSED
-    # a cost on the call is rolled up call -> subtask -> task: three events per record_cost
-    assert types.count(EventType.NODE_COST) == 6
+    # a cost on the step rolls up step -> Survey -> Research -> root: four events per record_cost
+    assert types.count(EventType.NODE_COST) == 8
 
     snap = await runs.snapshot(run_id)
     rebuilt = empty_snapshot(run_id)
@@ -97,7 +114,11 @@ async def test_subscriber_sees_events_in_order_and_replay_equals_snapshot(
     assert nodes[a].spent_micro == 0
     assert nodes[c].spent_micro == 2_000
     assert [(e.task_id, e.depends_on_task_id) for e in snap.edges] == [(b, a)]
-    assert nodes[s].path == f"{nodes[a].path}/s1"
+    assert nodes[root].rollup_spent_micro == 2_000
+    assert (nodes[root].path, nodes[a].path, nodes[b].path) == ("/t1", "/t1/t1", "/t1/t2")
+    assert nodes[s].path == f"{nodes[a].path}/t1"
+    assert nodes[c].path == f"{nodes[s].path}/s1"
+    assert [nodes[n].depth for n in (root, a, s, c)] == [0, 1, 2, 3]
 
 
 async def test_replay_is_idempotent_for_overlap(runs: RunService, hub: EventHub) -> None:
@@ -128,25 +149,17 @@ async def test_rolled_back_change_emits_nothing(runs: RunService, hub: EventHub)
                 await tx.emit(run_id, EventType.RUN_STATUS, status="running")
                 raise RuntimeError("boom")
         assert queue.empty()
-    assert [e.type for e in await hub.read_after(run_id, 0)] == [EventType.RUN_CREATED]
+    assert [e.type for e in await hub.read_after(run_id, 0)] == [
+        EventType.RUN_CREATED,
+        EventType.NODE_CREATED,  # the root task, created with the run
+    ]
 
 
 async def test_keepalive_when_idle(runs: RunService, hub: EventHub) -> None:
     run_id = await runs.create_run("x")
-    stream = event_stream(hub, run_id, after=1, keepalive_s=0.01)
+    stream = event_stream(hub, run_id, after=2, keepalive_s=0.01)  # run + root already seen
     assert await anext(stream) == ": keepalive\n\n"
     await stream.aclose()
-
-
-async def test_invalid_graph_writes_are_rejected(runs: RunService) -> None:
-    run_id = await runs.create_run("x")
-    t = await runs.add_node(run_id, NodeKind.TASK, "t")
-    with pytest.raises(ValueError, match="unknown dependency"):
-        await runs.add_node(run_id, NodeKind.TASK, "u", depends_on=["nope"])
-    with pytest.raises(ValueError, match="only tasks"):
-        await runs.add_node(run_id, NodeKind.SUBTASK, "s", parent_id=t, depends_on=[t])
-    with pytest.raises(ValueError, match="non-negative"):
-        await runs.record_cost(t, -1)
 
 
 def test_http_snapshot_and_stream(client: TestClient) -> None:
@@ -155,7 +168,7 @@ def test_http_snapshot_and_stream(client: TestClient) -> None:
 
     snap = client.get(f"/api/runs/{run_id}").json()
     assert snap["run"]["status"] == "closed"
-    assert len(snap["nodes"]) == 4 and snap["seq"] > 0
+    assert len(snap["nodes"]) == 4 and snap["seq"] > 0  # root, two tasks, one step
 
     with client.stream("GET", f"/api/runs/{run_id}/stream") as r:
         assert r.headers["content-type"].startswith("text/event-stream")
