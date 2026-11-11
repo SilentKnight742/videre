@@ -28,6 +28,8 @@ class Settings(BaseSettings):
 
     gemini_api_key: SecretStr = SecretStr("")
     gemini_model: str = ""
+    # Client-side request budget for the model provider (free tier).
+    gemini_rpm: int = Field(default=10, gt=0)
 
     rail: Literal["paypal", "mock"] = "mock"
     demo_replay: bool = False
