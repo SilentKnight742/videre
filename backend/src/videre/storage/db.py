@@ -10,6 +10,11 @@ from typing import Any
 import aiosqlite
 
 SCHEMA = resources.files("videre.storage").joinpath("schema.sql")
+SCHEMA_VERSION = 2
+
+
+class SchemaMismatch(RuntimeError):
+    """The database file was made by another schema version. Dev only: no migrations."""
 
 
 class Store:
@@ -40,8 +45,28 @@ class Store:
         await conn.execute("PRAGMA journal_mode = WAL")
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.execute("PRAGMA busy_timeout = 5000")
-        await conn.executescript(SCHEMA.read_text(encoding="utf-8"))
+        try:
+            await self._check_version(conn)
+            await conn.executescript(SCHEMA.read_text(encoding="utf-8"))
+            await conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        except BaseException:
+            await conn.close()
+            raise
         self._conn = conn
+
+    async def _check_version(self, conn: aiosqlite.Connection) -> None:
+        async with conn.execute("PRAGMA user_version") as cur:
+            version = (await cur.fetchone())[0]  # type: ignore[index]
+        if version == SCHEMA_VERSION:
+            return
+        # Version 0 is a fresh file, or one from before versioning (schema v1, which had tables).
+        async with conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'") as cur:
+            has_tables = (await cur.fetchone())[0] > 0  # type: ignore[index]
+        if version != 0 or has_tables:
+            raise SchemaMismatch(
+                f"{self._path} has schema version {version or 1}, expected {SCHEMA_VERSION}:"
+                " delete videre.db (schema changed)"
+            )
 
     async def close(self) -> None:
         if self._conn is not None:

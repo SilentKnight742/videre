@@ -5,7 +5,7 @@ from enum import StrEnum
 
 import pytest
 
-from videre.domain.states import LedgerType, NodeKind, NodeStatus, RunStatus
+from videre.domain.states import LedgerType, NodeKind, NodeStatus, RunStatus, StepType
 from videre.storage.db import SCHEMA
 
 
@@ -23,6 +23,7 @@ def check_values(table: str, column: str) -> set[str]:
     [
         ("runs", "status", RunStatus),
         ("nodes", "kind", NodeKind),
+        ("nodes", "step_type", StepType),
         ("nodes", "status", NodeStatus),
         ("ledger", "type", LedgerType),
     ],
