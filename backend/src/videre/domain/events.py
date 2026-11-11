@@ -29,6 +29,7 @@ def clip(text: str | None, limit: int) -> str | None:
 class EventType(StrEnum):
     RUN_CREATED = "run.created"
     RUN_STATUS = "run.status"
+    RUN_TITLE = "run.title"
     RUN_CLOSED = "run.closed"
     NODE_CREATED = "node.created"
     NODE_STATUS = "node.status"
@@ -138,6 +139,8 @@ def apply_event(snap: Snapshot, ev: Event) -> Snapshot:
             if p.get("error") is not None:
                 fields["error"] = p["error"]
             run = run.model_copy(update=fields)
+        case EventType.RUN_TITLE:
+            run = run.model_copy(update={"title": p["title"]})
         case EventType.RUN_CLOSED:
             run = run.model_copy(update={"status": "closed"})
         case EventType.NODE_CREATED if ev.node_id:

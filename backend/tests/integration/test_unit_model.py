@@ -240,12 +240,51 @@ async def test_run_status_carries_an_error(runs: RunService, hub: EventHub) -> N
     assert snap == await replay(hub, run_id)
 
 
+# ---- run title ----------------------------------------------------------------------------------
+
+
+async def test_set_run_title_emits_an_event_the_reducer_applies(
+    runs: RunService, hub: EventHub
+) -> None:
+    run_id = await runs.create_run("build a website for my flower shop", title="first")
+    await runs.set_run_title(run_id, "  Flower   shop\nwebsite ")
+    last = (await hub.read_after(run_id, 0))[-1]
+    assert (last.type, last.node_id, last.payload) == (
+        "run.title",
+        None,
+        {"title": "Flower shop website"},
+    )
+    snap = await runs.snapshot(run_id)
+    assert snap.run.title == "Flower shop website"
+    assert snap == await replay(hub, run_id)
+    assert apply_event(snap, last) == snap  # idempotent: the payload is absolute
+
+    await runs.set_run_title(run_id, "x" * 100)
+    title = (await runs.snapshot(run_id)).run.title or ""
+    assert len(title) == 60
+    assert title.endswith("…")
+    assert await runs.snapshot(run_id) == await replay(hub, run_id)
+
+
+async def test_set_run_title_rejects_blank_titles_and_unknown_runs(
+    runs: RunService, hub: EventHub
+) -> None:
+    run_id = await runs.create_run("build a website for my flower shop")
+    before = await hub.read_after(run_id, 0)
+    with pytest.raises(ValueError, match="empty"):
+        await runs.set_run_title(run_id, " \n ")
+    with pytest.raises(ValueError, match="unknown run"):
+        await runs.set_run_title("run_nope", "Title")
+    assert await hub.read_after(run_id, 0) == before
+
+
 # ---- content events and full replay ----------------------------------------------------------
 
 
 async def test_every_event_type_replays_to_the_snapshot(runs: RunService, hub: EventHub) -> None:
     run_id, root = await run_with_root(runs)
     await runs.set_run_status(run_id, RunStatus.RUNNING)
+    await runs.set_run_title(run_id, "Flower shop website")
     await runs.set_node_status(root, NodeStatus.RUNNING)
     leaf = await runs.add_node(
         run_id, T, "Write page", parent_id=root, objective="index.html exists", actor="planner"
@@ -306,7 +345,7 @@ async def test_every_event_type_replays_to_the_snapshot(runs: RunService, hub: E
     assert nodes[leaf].objective == "index.html exists"
     assert nodes[root].rollup_spent_micro == 300
     assert [(a.path, a.bytes, a.node_id) for a in snap.artifacts] == [("index.html", 9, tool)]
-    assert snap.run.status == "completed"
+    assert (snap.run.status, snap.run.title) == ("completed", "Flower shop website")
 
     # heavy text stays out of events, but is kept in node_io
     io = await runs.hub.store.fetch_one(
